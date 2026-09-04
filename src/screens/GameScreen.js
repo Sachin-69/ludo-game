@@ -6,10 +6,12 @@ import {
   StyleSheet,
   useWindowDimensions,
   ScrollView,
+  ImageBackground,
 } from "react-native";
 import Board from "../components/Board";
 import Dice from "../components/Dice";
 import { COLORS, GRID } from "../game/constants";
+import { FELT_IMAGE } from "../assets";
 import { gameReducer, ACTIONS } from "../game/reducer";
 import {
   createInitialState,
@@ -170,7 +172,7 @@ export default function GameScreen({ players, isBot, onExit }) {
   ) : null;
 
   return (
-    <View style={styles.screen}>
+    <ImageBackground source={FELT_IMAGE} style={styles.screen} resizeMode="cover">
       <ScrollView contentContainerStyle={styles.scroll}>
         {/* Header */}
         <View style={styles.header}>
@@ -310,7 +312,7 @@ export default function GameScreen({ players, isBot, onExit }) {
           </View>
         </View>
       )}
-    </View>
+    </ImageBackground>
   );
 }
 

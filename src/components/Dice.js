@@ -1,43 +1,13 @@
 import React, { useEffect, useRef } from "react";
-import { View, Text, Pressable, StyleSheet, Animated, Easing } from "react-native";
+import { View, Text, Pressable, StyleSheet, Animated, Easing, Image } from "react-native";
 import { COLORS } from "../game/constants";
-
-// Pip layouts for faces 1-6 (3x3 grid positions that are filled).
-const PIPS = {
-  1: [4],
-  2: [0, 8],
-  3: [0, 4, 8],
-  4: [0, 2, 6, 8],
-  5: [0, 2, 4, 6, 8],
-  6: [0, 2, 3, 5, 6, 8],
-};
-
-function DieFace({ value, color, pipSize }) {
-  const filled = PIPS[value] || [];
-  return (
-    <View style={styles.face}>
-      {Array.from({ length: 9 }).map((_, i) => (
-        <View key={i} style={styles.pipCell}>
-          {filled.includes(i) ? (
-            <View
-              style={[
-                styles.pip,
-                { backgroundColor: color, width: pipSize, height: pipSize, borderRadius: pipSize },
-              ]}
-            />
-          ) : null}
-        </View>
-      ))}
-    </View>
-  );
-}
+import { DICE_IMAGES } from "../assets";
 
 export default function Dice({ value, color, onRoll, disabled, rolling, compact }) {
   const spin = useRef(new Animated.Value(0)).current;
   const pulse = useRef(new Animated.Value(1)).current;
 
-  const size = compact ? 52 : 64;
-  const pipSize = compact ? 7 : 9;
+  const size = compact ? 56 : 68;
 
   // Spin animation while rolling.
   useEffect(() => {
@@ -52,7 +22,7 @@ export default function Dice({ value, color, onRoll, disabled, rolling, compact 
     }
   }, [rolling, value]);
 
-  // Gentle pulse when the die is ready to be tapped.
+  // Gentle pulse when ready to tap.
   const rollable = !disabled && !!onRoll;
   useEffect(() => {
     let loop;
@@ -75,22 +45,29 @@ export default function Dice({ value, color, onRoll, disabled, rolling, compact 
     outputRange: ["0deg", "360deg"],
   });
 
+  const face = DICE_IMAGES[value || 1];
+
   return (
     <Pressable onPress={onRoll} disabled={disabled} style={styles.wrap}>
       <Animated.View
         style={[
-          styles.die,
           {
             width: size,
             height: size,
-            borderColor: color,
             transform: [{ rotate }, { scale: pulse }],
           },
-          rollable && { shadowColor: color, shadowOpacity: 0.9, shadowRadius: 8, elevation: 8 },
-          disabled && styles.dieDisabled,
+          rollable && {
+            shadowColor: color,
+            shadowOpacity: 0.9,
+            shadowRadius: 9,
+            shadowOffset: { width: 0, height: 0 },
+            elevation: 9,
+            borderRadius: size * 0.22,
+          },
+          disabled && !rollable && styles.dieDisabled,
         ]}
       >
-        <DieFace value={value || 1} color={color} pipSize={pipSize} />
+        <Image source={face} style={{ width: size, height: size }} resizeMode="contain" />
       </Animated.View>
       {!compact && (
         <Text style={[styles.label, disabled && styles.labelDisabled]}>
@@ -103,32 +80,13 @@ export default function Dice({ value, color, onRoll, disabled, rolling, compact 
 
 const styles = StyleSheet.create({
   wrap: { alignItems: "center" },
-  die: {
-    borderRadius: 12,
-    backgroundColor: "#fff",
-    borderWidth: 3,
-    padding: 6,
-    shadowColor: "#000",
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 3,
-  },
-  dieDisabled: { opacity: 0.5 },
-  face: { flex: 1, flexDirection: "row", flexWrap: "wrap" },
-  pipCell: {
-    width: "33.33%",
-    height: "33.33%",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  pip: {},
+  dieDisabled: { opacity: 0.55 },
   label: {
     marginTop: 6,
     fontSize: 11,
     fontWeight: "700",
     letterSpacing: 0.5,
-    color: COLORS.dark,
+    color: "#fff",
   },
   labelDisabled: { color: "#94a3b8" },
 });
