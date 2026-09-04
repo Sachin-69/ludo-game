@@ -93,3 +93,24 @@ export function ringIndexOf(player, progress) {
   if (progress < 0 || progress >= HOME_ENTRY_OFFSET) return null;
   return (START_INDEX[player] + progress) % RING_LEN;
 }
+
+// Returns the ordered list of [row,col] cells a token passes THROUGH,
+// step by step, moving from `fromProgress` to `toProgress`. Used to
+// animate the hop-by-hop movement. Excludes the starting cell, includes
+// the destination. Handles leaving the yard (fromProgress === AT_HOME).
+export function pathCells(player, fromProgress, toProgress, tokenIndex) {
+  const cells = [];
+  // Leaving the yard: single hop onto the entry cell (progress 0).
+  if (fromProgress === AT_HOME) {
+    cells.push(progressToCell(player, 0, tokenIndex));
+    // If somehow the destination is beyond 0, continue stepping.
+    for (let p = 1; p <= toProgress; p++) {
+      cells.push(progressToCell(player, p, tokenIndex));
+    }
+    return cells;
+  }
+  for (let p = fromProgress + 1; p <= toProgress; p++) {
+    cells.push(progressToCell(player, p, tokenIndex));
+  }
+  return cells;
+}

@@ -9,7 +9,7 @@ import {
 } from "react-native";
 import Board from "../components/Board";
 import Dice from "../components/Dice";
-import { COLORS } from "../game/constants";
+import { COLORS, GRID } from "../game/constants";
 import { gameReducer, ACTIONS } from "../game/reducer";
 import {
   createInitialState,
@@ -20,6 +20,14 @@ import {
 } from "../game/logic";
 import { botChooseMove, botShouldCarry } from "../game/bot";
 
+// Which board corner each player's dice floats at (grid cell of corner).
+const CORNER = {
+  red: { row: 2.5, col: 2.5 },
+  green: { row: 2.5, col: 11.5 },
+  yellow: { row: 11.5, col: 11.5 },
+  blue: { row: 11.5, col: 2.5 },
+};
+
 export default function GameScreen({ players, isBot, onExit }) {
   const [state, dispatch] = useReducer(
     gameReducer,
@@ -28,12 +36,16 @@ export default function GameScreen({ players, isBot, onExit }) {
   );
   const { width } = useWindowDimensions();
   const boardSize = Math.min(width - 24, 380);
+  const cell = boardSize / GRID;
   const [rolling, setRolling] = useState(false);
+
+  // Number of tokens currently mid-animation. Input is locked while > 0.
+  const [animating, setAnimating] = useState(0);
+  const busy = animating > 0;
 
   const currentIsBot = state.isBot[state.turn];
   const gameOver = isGameOver(state);
 
-  // Available moves given current dice.
   const singleMoves = useMemo(
     () => (state.awaitingRoll ? [] : legalMoves(state, state.turn)),
     [state]
@@ -43,28 +55,25 @@ export default function GameScreen({ players, isBot, onExit }) {
     [state]
   );
 
-  // Tokens the human can currently tap.
   const highlighted = useMemo(() => {
-    if (state.awaitingRoll || currentIsBot) return [];
+    if (state.awaitingRoll || currentIsBot || busy) return [];
     const set = new Map();
     [...singleMoves, ...combos].forEach((m) => {
       set.set(m.tokenIndex, { color: state.turn, tokenIndex: m.tokenIndex });
     });
     return Array.from(set.values());
-  }, [singleMoves, combos, state.turn, state.awaitingRoll, currentIsBot]);
+  }, [singleMoves, combos, state.turn, state.awaitingRoll, currentIsBot, busy]);
 
-  // Whether a carry choice is currently offered (human only).
   const canOfferCarry =
     !state.awaitingRoll &&
     state.lastRoll === 6 &&
     state.sixCount < 3 &&
     !currentIsBot;
 
-  // For choosing a specific die/combo when a token has multiple options.
   const [pendingToken, setPendingToken] = useState(null);
 
   const handleRoll = () => {
-    if (rolling) return;
+    if (rolling || busy) return;
     setRolling(true);
     setTimeout(() => {
       dispatch({ type: ACTIONS.ROLL });
@@ -73,7 +82,7 @@ export default function GameScreen({ players, isBot, onExit }) {
   };
 
   const handleTokenPress = (color, tokenIndex) => {
-    if (color !== state.turn) return;
+    if (color !== state.turn || busy) return;
     const opts = [
       ...singleMoves.filter((m) => m.tokenIndex === tokenIndex),
       ...combos.filter((m) => m.tokenIndex === tokenIndex),
@@ -83,7 +92,6 @@ export default function GameScreen({ players, isBot, onExit }) {
       dispatch({ type: ACTIONS.MOVE, move: opts[0] });
       setPendingToken(null);
     } else {
-      // Multiple ways to move this token (different dice / combo).
       setPendingToken({ tokenIndex, opts });
     }
   };
@@ -93,10 +101,24 @@ export default function GameScreen({ players, isBot, onExit }) {
     setPendingToken(null);
   };
 
+  // ── #3 Auto-move: when exactly ONE legal move exists, play it
+  //     automatically — EXCEPT when the roll is a 6 and the player
+  //     can still carry (keep their choice to carry vs move).
+  useEffect(() => {
+    if (gameOver || currentIsBot || state.awaitingRoll || busy) return;
+    const all = [...singleMoves, ...combos];
+    if (all.length !== 1) return;
+    // If a 6 with carry still available, don't auto-move (let them choose).
+    if (state.lastRoll === 6 && state.sixCount < 3) return;
+    const t = setTimeout(() => {
+      dispatch({ type: ACTIONS.MOVE, move: all[0] });
+    }, 250);
+    return () => clearTimeout(t);
+  }, [singleMoves, combos, gameOver, currentIsBot, state.awaitingRoll, state.lastRoll, state.sixCount, busy]);
+
   // ── Bot automation ────────────────────────────────────────
   useEffect(() => {
-    if (gameOver) return;
-    if (!currentIsBot) return;
+    if (gameOver || !currentIsBot || busy) return;
 
     const t = setTimeout(() => {
       if (state.awaitingRoll) {
@@ -107,24 +129,45 @@ export default function GameScreen({ players, isBot, onExit }) {
         }, 300);
         return;
       }
-      // Bot has dice. Decide carry vs move.
       if (state.lastRoll === 6 && state.sixCount < 3 && botShouldCarry(state)) {
-        // Only carry if it still has yard tokens or wants extra distance.
         dispatch({ type: ACTIONS.CARRY });
         return;
       }
       const move = botChooseMove(state);
-      if (move) {
-        dispatch({ type: ACTIONS.MOVE, move });
-      } else {
-        dispatch({ type: ACTIONS.END_TURN });
-      }
-    }, 650);
+      if (move) dispatch({ type: ACTIONS.MOVE, move });
+      else dispatch({ type: ACTIONS.END_TURN });
+    }, 600);
     return () => clearTimeout(t);
-  }, [state, currentIsBot, gameOver]);
+  }, [state, currentIsBot, gameOver, busy]);
 
-  // Auto-clear pending token selection when turn changes.
   useEffect(() => setPendingToken(null), [state.turn, state.pendingDice.length]);
+
+  // ── #1 Floating dice at the active player's corner ─────────
+  const corner = CORNER[state.turn];
+  const diceSlot = !gameOver ? (
+    <View
+      pointerEvents={currentIsBot ? "none" : "auto"}
+      style={{
+        position: "absolute",
+        left: corner.col * cell - cell * 1.4,
+        top: corner.row * cell - cell * 1.4,
+        width: cell * 2.8,
+        height: cell * 2.8,
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 40,
+      }}
+    >
+      <Dice
+        value={state.lastRoll}
+        color={COLORS[state.turn]}
+        onRoll={state.awaitingRoll && !currentIsBot ? handleRoll : undefined}
+        disabled={!state.awaitingRoll || currentIsBot || rolling || busy}
+        rolling={rolling}
+        compact
+      />
+    </View>
+  ) : null;
 
   return (
     <View style={styles.screen}>
@@ -135,9 +178,7 @@ export default function GameScreen({ players, isBot, onExit }) {
             <Text style={styles.exitText}>‹ Menu</Text>
           </Pressable>
           <View style={styles.turnPill}>
-            <View
-              style={[styles.turnDot, { backgroundColor: COLORS[state.turn] }]}
-            />
+            <View style={[styles.turnDot, { backgroundColor: COLORS[state.turn] }]} />
             <Text style={styles.turnText}>
               {cap(state.turn)}
               {currentIsBot ? " (CPU)" : ""}
@@ -147,7 +188,7 @@ export default function GameScreen({ players, isBot, onExit }) {
 
         {/* Message banner */}
         <View style={styles.banner}>
-          <Text style={styles.bannerText}>{state.message || "Roll to begin!"}</Text>
+          <Text style={styles.bannerText}>{state.message || "Tap the dice to begin!"}</Text>
         </View>
 
         {/* Dice-in-hand indicator */}
@@ -167,72 +208,63 @@ export default function GameScreen({ players, isBot, onExit }) {
           </View>
         )}
 
-        {/* Board */}
+        {/* Board with floating dice */}
         <View style={styles.boardWrap}>
           <Board
             state={state}
             size={boardSize}
             highlightedTokens={highlighted}
             onTokenPress={handleTokenPress}
+            onAnimStart={() => setAnimating((n) => n + 1)}
+            onAnimEnd={() => setAnimating((n) => Math.max(0, n - 1))}
+            diceSlot={diceSlot}
           />
         </View>
 
-        {/* Controls */}
+        {/* Controls area (carry choice / hints) */}
         {!gameOver && !currentIsBot && (
           <View style={styles.controls}>
             {state.awaitingRoll ? (
-              <Dice
-                value={state.lastRoll}
-                color={COLORS[state.turn]}
-                onRoll={handleRoll}
-                disabled={rolling}
-                rolling={rolling}
-              />
-            ) : (
-              <View style={{ alignItems: "center" }}>
-                <Dice
-                  value={state.lastRoll}
-                  color={COLORS[state.turn]}
-                  disabled={true}
-                  rolling={rolling}
-                />
-                {/* CARRY-THE-6 choice */}
-                {canOfferCarry && (
-                  <View style={styles.carryRow}>
-                    <Pressable
-                      style={[styles.carryBtn, { backgroundColor: "#fbbf24" }]}
-                      onPress={() => dispatch({ type: ACTIONS.CARRY })}
-                    >
-                      <Text style={styles.carryText}>⭐ CARRY THE 6 & ROLL AGAIN</Text>
-                    </Pressable>
-                    <Pressable
-                      style={[styles.carryBtn, styles.carryDecline]}
-                      onPress={() => dispatch({ type: ACTIONS.DECLINE_CARRY })}
-                    >
-                      <Text style={styles.carryDeclineText}>Move now</Text>
-                    </Pressable>
-                  </View>
-                )}
-                {!canOfferCarry && (
-                  <Text style={styles.hint}>
-                    {highlighted.length > 0
-                      ? "Tap a highlighted token to move."
-                      : "No moves — passing turn…"}
-                  </Text>
-                )}
+              <Text style={styles.hint}>
+                Tap the {cap(state.turn)} dice on the board to roll.
+              </Text>
+            ) : canOfferCarry ? (
+              <View style={styles.carryRow}>
+                <Pressable
+                  style={[styles.carryBtn, { backgroundColor: "#fbbf24" }]}
+                  onPress={() => !busy && dispatch({ type: ACTIONS.CARRY })}
+                >
+                  <Text style={styles.carryText}>⭐ CARRY THE 6 & ROLL AGAIN</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.carryBtn, styles.carryDecline]}
+                  onPress={() => !busy && dispatch({ type: ACTIONS.DECLINE_CARRY })}
+                >
+                  <Text style={styles.carryDeclineText}>Move now</Text>
+                </Pressable>
               </View>
+            ) : (
+              <Text style={styles.hint}>
+                {busy
+                  ? "Moving…"
+                  : highlighted.length > 0
+                  ? "Tap a highlighted token to move."
+                  : "No moves — passing turn…"}
+              </Text>
             )}
           </View>
         )}
 
         {currentIsBot && !gameOver && (
           <View style={styles.controls}>
-            <Text style={styles.thinking}>Computer is thinking…</Text>
+            <Text style={styles.thinking}>
+              {busy ? "Moving…" : "Computer is thinking…"}
+            </Text>
           </View>
         )}
 
         {/* Winners */}
-        {state.winners.length > 0 && (
+        {state.winners.length > 0 && !gameOver && (
           <View style={styles.winners}>
             <Text style={styles.winnersTitle}>🏆 Finished</Text>
             {state.winners.map((w, i) => (
@@ -264,11 +296,7 @@ export default function GameScreen({ players, isBot, onExit }) {
               Move token {pendingToken.tokenIndex + 1} using:
             </Text>
             {pendingToken.opts.map((m, i) => (
-              <Pressable
-                key={i}
-                style={styles.optBtn}
-                onPress={() => chooseMove(m)}
-              >
+              <Pressable key={i} style={styles.optBtn} onPress={() => chooseMove(m)}>
                 <Text style={styles.optText}>
                   {m.combo
                     ? `Combine dice → move ${m.die} (${m.diceUsed.join(" + ")})`
@@ -276,10 +304,7 @@ export default function GameScreen({ players, isBot, onExit }) {
                 </Text>
               </Pressable>
             ))}
-            <Pressable
-              style={styles.cancelBtn}
-              onPress={() => setPendingToken(null)}
-            >
+            <Pressable style={styles.cancelBtn} onPress={() => setPendingToken(null)}>
               <Text style={styles.cancelText}>Cancel</Text>
             </Pressable>
           </View>
@@ -322,12 +347,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   bannerText: { color: "#e2e8f0", fontSize: 14, textAlign: "center" },
-  diceRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 8,
-    gap: 6,
-  },
+  diceRow: { flexDirection: "row", alignItems: "center", marginBottom: 8, gap: 6 },
   diceLabel: { color: "#94a3b8", fontSize: 13, marginRight: 4 },
   miniDie: {
     width: 30,
@@ -341,9 +361,9 @@ const styles = StyleSheet.create({
   miniDieText: { fontWeight: "900", fontSize: 16, color: COLORS.dark },
   sumText: { color: "#94a3b8", fontSize: 13, marginLeft: 4 },
   boardWrap: { marginVertical: 8 },
-  controls: { alignItems: "center", marginTop: 12, minHeight: 120 },
+  controls: { alignItems: "center", marginTop: 12, minHeight: 90 },
   hint: { color: "#94a3b8", marginTop: 10, fontSize: 13, textAlign: "center" },
-  carryRow: { marginTop: 14, alignItems: "center", gap: 8 },
+  carryRow: { marginTop: 8, alignItems: "center", gap: 8 },
   carryBtn: {
     paddingVertical: 12,
     paddingHorizontal: 20,
@@ -391,19 +411,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  modal: {
-    backgroundColor: "#1e293b",
-    borderRadius: 16,
-    padding: 20,
-    width: "80%",
-  },
+  modal: { backgroundColor: "#1e293b", borderRadius: 16, padding: 20, width: "80%" },
   modalTitle: { color: "#fff", fontWeight: "800", fontSize: 16, marginBottom: 12 },
-  optBtn: {
-    backgroundColor: "#334155",
-    borderRadius: 10,
-    padding: 14,
-    marginVertical: 5,
-  },
+  optBtn: { backgroundColor: "#334155", borderRadius: 10, padding: 14, marginVertical: 5 },
   optText: { color: "#fff", fontSize: 15, fontWeight: "600" },
   cancelBtn: { padding: 12, alignItems: "center", marginTop: 6 },
   cancelText: { color: "#94a3b8", fontWeight: "600" },

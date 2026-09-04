@@ -1,12 +1,12 @@
-import React from "react";
-import { View, Pressable, Text, StyleSheet } from "react-native";
-import { GRID, COLORS, SAFE_RING_CELLS, AT_HOME } from "../game/constants";
+import React, { useRef, useEffect } from "react";
+import { View, Pressable, Text, StyleSheet, Animated, Easing } from "react-native";
+import { GRID, COLORS, SAFE_RING_CELLS } from "../game/constants";
 import {
   RING_CELLS,
   HOME_COLUMNS,
   YARD_CELLS,
   progressToCell,
-  ringIndexOf,
+  pathCells,
 } from "../game/boardPath";
 
 // Build a lookup of which cells are "special" (colored) for painting.
@@ -14,18 +14,15 @@ function buildCellMeta() {
   const meta = {}; // "r,c" -> { type, color }
   const set = (r, c, type, color) => (meta[`${r},${c}`] = { type, color });
 
-  // Ring cells default to path color.
   RING_CELLS.forEach(([r, c], idx) => {
     set(r, c, "ring", COLORS.path);
     if (SAFE_RING_CELLS.includes(idx)) meta[`${r},${c}`].safe = true;
   });
 
-  // Home columns colored per player.
   Object.entries(HOME_COLUMNS).forEach(([color, cells]) => {
     cells.forEach(([r, c]) => set(r, c, "home", COLORS[color]));
   });
 
-  // Entry cells colored per player.
   const entries = { red: 0, green: 13, yellow: 26, blue: 39 };
   Object.entries(entries).forEach(([color, idx]) => {
     const [r, c] = RING_CELLS[idx];
@@ -37,7 +34,6 @@ function buildCellMeta() {
 
 const CELL_META = buildCellMeta();
 
-// The four large colored corner yards.
 const YARD_REGIONS = [
   { color: "red", r0: 0, c0: 0 },
   { color: "green", r0: 0, c0: 9 },
@@ -45,28 +41,156 @@ const YARD_REGIONS = [
   { color: "yellow", r0: 9, c0: 9 },
 ];
 
-export default function Board({ state, size, highlightedTokens, onTokenPress }) {
+// Per-hop animation duration (ms). Kept short so it's fast but visible.
+const HOP_MS = 110;
+
+// ── Single animated token ────────────────────────────────────
+function AnimatedToken({
+  color,
+  tokenIndex,
+  progress,
+  cell,
+  stackOffset,
+  highlighted,
+  onPress,
+  onAnimStart,
+  onAnimEnd,
+}) {
+  const pos = useRef(new Animated.ValueXY(cellToXY(progressToCell(color, progress, tokenIndex), cell))).current;
+  const prevProgress = useRef(progress);
+  const bounce = useRef(new Animated.Value(1)).current;
+
+  // Compute pixel position of a [row,col] cell.
+  function cellToXYlocal(rc) {
+    return cellToXY(rc, cell);
+  }
+
+  useEffect(() => {
+    const from = prevProgress.current;
+    const to = progress;
+    if (from === to) {
+      // No move, but cell size may have changed — snap.
+      pos.setValue(cellToXYlocal(progressToCell(color, to, tokenIndex)));
+      return;
+    }
+
+    // Capture / send-home (to yard) or large jump backwards: snap instantly.
+    const goingHome = to === -1;
+    if (goingHome || to < from) {
+      pos.setValue(cellToXYlocal(progressToCell(color, to, tokenIndex)));
+      prevProgress.current = to;
+      return;
+    }
+
+    // Build the hop-by-hop path and animate through it.
+    const trail = pathCells(color, from, to, tokenIndex);
+    if (trail.length === 0) {
+      prevProgress.current = to;
+      return;
+    }
+
+    onAnimStart?.();
+    const steps = trail.map((rc) =>
+      Animated.timing(pos, {
+        toValue: cellToXYlocal(rc),
+        duration: HOP_MS,
+        easing: Easing.linear,
+        useNativeDriver: false,
+      })
+    );
+    // Little landing bounce at the end.
+    const land = Animated.sequence([
+      Animated.timing(bounce, { toValue: 1.25, duration: 90, useNativeDriver: false }),
+      Animated.spring(bounce, { toValue: 1, friction: 4, useNativeDriver: false }),
+    ]);
+
+    Animated.sequence([...steps, land]).start(() => {
+      prevProgress.current = to;
+      onAnimEnd?.();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progress, cell]);
+
+  const dotSize = cell * 0.72;
+
+  return (
+    <Animated.View
+      style={{
+        position: "absolute",
+        transform: [
+          { translateX: Animated.add(pos.x, new Animated.Value(stackOffset)) },
+          { translateY: Animated.add(pos.y, new Animated.Value(-stackOffset)) },
+        ],
+        zIndex: highlighted ? 30 : 10,
+      }}
+    >
+      <Pressable disabled={!highlighted} onPress={() => onPress?.(color, tokenIndex)}>
+        <Animated.View
+          style={[
+            styles.token,
+            {
+              width: dotSize,
+              height: dotSize,
+              borderRadius: dotSize,
+              backgroundColor: COLORS[color],
+              borderColor: highlighted ? "#fff" : "rgba(0,0,0,0.35)",
+              borderWidth: highlighted ? 3 : 2,
+              transform: [{ scale: bounce }],
+            },
+            highlighted && styles.tokenGlow,
+          ]}
+        >
+          {/* glossy highlight dot */}
+          <View
+            style={{
+              position: "absolute",
+              top: dotSize * 0.14,
+              left: dotSize * 0.2,
+              width: dotSize * 0.3,
+              height: dotSize * 0.3,
+              borderRadius: dotSize,
+              backgroundColor: "rgba(255,255,255,0.55)",
+            }}
+          />
+          <Text style={{ color: "#fff", fontSize: dotSize * 0.45, fontWeight: "800" }}>
+            {tokenIndex + 1}
+          </Text>
+        </Animated.View>
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+// [row,col] -> {x,y} top-left pixel of the token within its cell.
+function cellToXY([r, c], cell) {
+  return { x: c * cell + cell * 0.14, y: r * cell + cell * 0.14 };
+}
+
+export default function Board({
+  state,
+  size,
+  highlightedTokens,
+  onTokenPress,
+  onAnimStart,
+  onAnimEnd,
+  diceSlot, // optional React node rendered at active player's corner
+}) {
   const cell = size / GRID;
 
-  // Map every token to its pixel position.
-  const tokenDots = [];
+  // Determine stack offsets so co-located tokens don't fully overlap.
+  const occ = {};
+  const tokenList = [];
   Object.entries(state.tokens).forEach(([color, progresses]) => {
     progresses.forEach((progress, tokenIndex) => {
-      const [r, c] = progressToCell(color, progress, tokenIndex);
-      const key = `${color}-${tokenIndex}`;
+      const rc = progressToCell(color, progress, tokenIndex);
+      const k = `${rc[0]},${rc[1]}`;
+      occ[k] = (occ[k] || 0) + 1;
+      const stackIdx = occ[k] - 1;
       const highlighted = highlightedTokens?.some(
         (h) => h.color === color && h.tokenIndex === tokenIndex
       );
-      tokenDots.push({ color, tokenIndex, r, c, key, highlighted, progress });
+      tokenList.push({ color, tokenIndex, progress, stackIdx, highlighted });
     });
-  });
-
-  // Stack offset so multiple tokens on the same cell don't fully overlap.
-  const cellOccupants = {};
-  tokenDots.forEach((t) => {
-    const k = `${t.r},${t.c}`;
-    cellOccupants[k] = (cellOccupants[k] || 0) + 1;
-    t.stackIdx = cellOccupants[k] - 1;
   });
 
   return (
@@ -84,7 +208,7 @@ export default function Board({ state, size, highlightedTokens, onTokenPress }) 
             backgroundColor: COLORS[y.color + "Soft"],
             borderWidth: 2,
             borderColor: COLORS[y.color],
-            borderRadius: 8,
+            borderRadius: 10,
           }}
         >
           <View style={styles.yardInner}>
@@ -108,7 +232,7 @@ export default function Board({ state, size, highlightedTokens, onTokenPress }) 
         </View>
       ))}
 
-      {/* Path cells (ring + home columns) */}
+      {/* Path cells */}
       {Object.entries(CELL_META).map(([k, m]) => {
         const [r, c] = k.split(",").map(Number);
         return (
@@ -127,12 +251,14 @@ export default function Board({ state, size, highlightedTokens, onTokenPress }) 
               justifyContent: "center",
             }}
           >
-            {m.safe ? <Text style={{ fontSize: cell * 0.5 }}>★</Text> : null}
+            {m.safe ? (
+              <Text style={{ fontSize: cell * 0.5, color: "#94a3b8" }}>★</Text>
+            ) : null}
           </View>
         );
       })}
 
-      {/* Center triangle / home */}
+      {/* Center home */}
       <View
         style={{
           position: "absolute",
@@ -143,51 +269,30 @@ export default function Board({ state, size, highlightedTokens, onTokenPress }) 
           backgroundColor: COLORS.dark,
           alignItems: "center",
           justifyContent: "center",
-          borderRadius: 6,
+          borderRadius: 8,
         }}
       >
         <Text style={{ fontSize: cell * 1.2 }}>🏁</Text>
       </View>
 
-      {/* Tokens */}
-      {tokenDots.map((t) => {
-        const offset = t.stackIdx * (cell * 0.18);
-        const dot = (
-          <View
-            style={[
-              styles.token,
-              {
-                width: cell * 0.72,
-                height: cell * 0.72,
-                borderRadius: cell,
-                backgroundColor: COLORS[t.color],
-                borderColor: t.highlighted ? "#fff" : "rgba(0,0,0,0.3)",
-                borderWidth: t.highlighted ? 3 : 2,
-              },
-              t.highlighted && styles.tokenGlow,
-            ]}
-          >
-            <Text style={{ color: "#fff", fontSize: cell * 0.35, fontWeight: "800" }}>
-              {t.tokenIndex + 1}
-            </Text>
-          </View>
-        );
-        return (
-          <Pressable
-            key={t.key}
-            disabled={!t.highlighted}
-            onPress={() => onTokenPress?.(t.color, t.tokenIndex)}
-            style={{
-              position: "absolute",
-              left: t.c * cell + cell * 0.14 + offset,
-              top: t.r * cell + cell * 0.14 - offset,
-              zIndex: t.highlighted ? 20 : 10 + t.stackIdx,
-            }}
-          >
-            {dot}
-          </Pressable>
-        );
-      })}
+      {/* Tokens (animated) */}
+      {tokenList.map((t) => (
+        <AnimatedToken
+          key={`${t.color}-${t.tokenIndex}`}
+          color={t.color}
+          tokenIndex={t.tokenIndex}
+          progress={t.progress}
+          cell={cell}
+          stackOffset={t.stackIdx * (cell * 0.2)}
+          highlighted={t.highlighted}
+          onPress={onTokenPress}
+          onAnimStart={onAnimStart}
+          onAnimEnd={onAnimEnd}
+        />
+      ))}
+
+      {/* Floating dice slot at active player's corner */}
+      {diceSlot}
     </View>
   );
 }
@@ -195,8 +300,8 @@ export default function Board({ state, size, highlightedTokens, onTokenPress }) 
 const styles = StyleSheet.create({
   board: {
     backgroundColor: COLORS.board,
-    borderRadius: 10,
-    borderWidth: 2,
+    borderRadius: 12,
+    borderWidth: 3,
     borderColor: COLORS.dark,
     overflow: "hidden",
   },
@@ -205,15 +310,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     shadowColor: "#000",
-    shadowOpacity: 0.3,
-    shadowRadius: 2,
-    shadowOffset: { width: 0, height: 1 },
-    elevation: 4,
+    shadowOpacity: 0.35,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 5,
   },
   tokenGlow: {
     shadowColor: "#fbbf24",
-    shadowOpacity: 0.9,
-    shadowRadius: 6,
-    elevation: 8,
+    shadowOpacity: 0.95,
+    shadowRadius: 7,
+    elevation: 10,
   },
 });
